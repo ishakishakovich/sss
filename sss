@@ -5,9 +5,16 @@
     ╚██╗ ██╔╝██╔══╝   ██╔██╗
      ╚████╔╝ ███████╗██╔╝ ██╗
       ╚═══╝  ╚══════╝╚═╝  ╚═╝
-    DAHOOD FRAMEWORK — NO-LAG BUILD
-    RightShift = меню. троттлинг, кэш, без :Wait() в цикле.
+    DAHOOD FRAMEWORK — FINAL v3
+    RightShift = меню. esp чистится, player list, multi-aim.
 ]]
+
+--==================== CLEAN RESTART ====================--
+if getgenv().__vexConns then
+    for _,c in ipairs(getgenv().__vexConns) do pcall(function() c:Disconnect() end) end
+end
+getgenv().__vexConns = {}
+local function track(c) table.insert(getgenv().__vexConns, c) return c end
 
 --==================== SERVICES ====================--
 local Players           = game:GetService("Players")
@@ -26,20 +33,9 @@ local function safe(fn, ...)
     if not ok then return nil end
     return res
 end
-
--- без :Wait() — иначе весь цикл встаёт пока персонаж грузится
-local function getChar(plr)
-    plr = plr or LocalPlayer
-    return plr and plr.Character
-end
-local function getHRP(plr)
-    local char = getChar(plr)
-    return char and char:FindFirstChild("HumanoidRootPart")
-end
-local function getHum(plr)
-    local char = getChar(plr)
-    return char and char:FindFirstChildOfClass("Humanoid")
-end
+local function getChar(plr) plr = plr or LocalPlayer return plr and plr.Character end
+local function getHRP(plr) local c = getChar(plr) return c and c:FindFirstChild("HumanoidRootPart") end
+local function getHum(plr) local c = getChar(plr) return c and c:FindFirstChildOfClass("Humanoid") end
 
 --==================== CONFIG ====================--
 local Config = {
@@ -94,6 +90,31 @@ local function isValidTarget(plr)
     return true
 end
 
+--==================== AIM LIST ====================--
+local AimList = {}
+local AimListOrder = {}
+
+local function addToAimList(plr)
+    if not plr or plr==LocalPlayer then return end
+    if AimList[plr] then return end
+    AimList[plr] = true
+    table.insert(AimListOrder, plr)
+end
+local function removeFromAimList(plr)
+    if not AimList[plr] then return end
+    AimList[plr] = nil
+    for i,p in ipairs(AimListOrder) do
+        if p == plr then table.remove(AimListOrder, i) break end
+    end
+end
+local function toggleAimList(plr)
+    if AimList[plr] then removeFromAimList(plr) else addToAimList(plr) end
+end
+local function clearAimList()
+    for _,p in ipairs(AimListOrder) do AimList[p] = nil end
+    AimListOrder = {}
+end
+
 --==================== ESP ====================--
 local espObjects = {}
 local function createESP(plr)
@@ -118,12 +139,21 @@ local function removeESP(plr)
             for _,d in ipairs(v) do safe(function() d:Remove() end) end
         else safe(function() v:Remove() end) end
     end
-    espObjects[plr]=nil
+    espObjects[plr] = nil
 end
 local function hideObj(o)
     for _,v in pairs(o) do
         if type(v)=="table" then for _,d in ipairs(v) do safe(function() d.Visible=false end) end
         else safe(function() v.Visible=false end) end
+    end
+end
+local function purgeESP()
+    for plr, o in pairs(espObjects) do
+        if not plr.Parent then
+            removeESP(plr)
+        elseif not plr.Character then
+            hideObj(o)
+        end
     end
 end
 local function getSkeletonPoints(plr)
@@ -140,7 +170,6 @@ local function getSkeletonPoints(plr)
     }
 end
 
--- ESP троттлится: ~15 fps вместо 60. глазам хватает.
 local espTick = 0
 local function updateESP()
     espTick += 1
@@ -264,6 +293,28 @@ local function getClosestToCursor(partName, fov)
     end
     return best
 end
+local function getMultiAimTarget(partName, fov)
+    if #AimListOrder == 0 then return nil end
+    local mouse = UserInputService:GetMouseLocation()
+    local best, bestDist = nil, fov
+    local toRemove = {}
+    for _, plr in ipairs(AimListOrder) do
+        if not plr.Parent then table.insert(toRemove, plr) continue end
+        if not isValidTarget(plr) then continue end
+        local char = plr.Character
+        local part = char and char:FindFirstChild(partName)
+        if not part then continue end
+        local screenPos, onScreen = Camera:WorldToViewportPoint(part.Position)
+        if not onScreen then continue end
+        local d = (Vector2.new(screenPos.X, screenPos.Y) - mouse).Magnitude
+        if d < bestDist then
+            bestDist = d
+            best = {player=plr, part=part}
+        end
+    end
+    for _, p in ipairs(toRemove) do removeFromAimList(p) end
+    return best
+end
 local function aimAt(target)
     if not target or not target.part then return end
     local part = target.part
@@ -282,17 +333,19 @@ local function aimAt(target)
     end
 end
 local aimHeld = false
-UserInputService.InputBegan:Connect(function(i, gpe)
+track(UserInputService.InputBegan:Connect(function(i, gpe)
     if gpe then return end
     if i.UserInputType == Config.aimbot.key then aimHeld = true end
-end)
-UserInputService.InputEnded:Connect(function(i)
+end))
+track(UserInputService.InputEnded:Connect(function(i)
     if i.UserInputType == Config.aimbot.key then aimHeld = false end
-end)
+end))
 local function updateAimbot()
     if not Config.aimbot.enabled or not aimHeld then return end
     local target
-    if Target and isValidTarget(Target) then
+    if #AimListOrder > 0 then
+        target = getMultiAimTarget(Config.aimbot.part, Config.aimbot.fov)
+    elseif Target and isValidTarget(Target) then
         local part = Target.Character and Target.Character:FindFirstChild(Config.aimbot.part)
         if part then target = {player=Target, part=part} end
     else
@@ -302,7 +355,6 @@ local function updateAimbot()
 end
 
 --==================== MOVEMENT ====================--
--- noclip кэшируется: GetDescendants зовём один раз, не каждый кадр
 local noclipCache = {}
 local function updateNoclip()
     local char = LocalPlayer.Character
@@ -325,20 +377,27 @@ local function updateNoclip()
         end
     end
 end
-
+local wasFlying = false
 local function updateMovement()
     local char = LocalPlayer.Character
     if not char then return end
     local hum = char:FindFirstChildOfClass("Humanoid")
     local hrp = char:FindFirstChild("HumanoidRootPart")
     if not hum or not hrp then return end
-    if Config.movement.speedEnabled and hum.WalkSpeed ~= Config.movement.speedValue then
-        hum.WalkSpeed = Config.movement.speedValue
+    if Config.movement.speedEnabled then
+        if hum.WalkSpeed ~= Config.movement.speedValue then hum.WalkSpeed = Config.movement.speedValue end
+    elseif hum.WalkSpeed > 20 and hum.WalkSpeed ~= 16 then
+        hum.WalkSpeed = 16
     end
-    if hum.UseJumpPower and hum.JumpPower ~= Config.movement.jumpPower then
+    if hum.UseJumpPower and Config.movement.jumpPower and hum.JumpPower ~= Config.movement.jumpPower then
         hum.JumpPower = Config.movement.jumpPower
     end
-    if Config.movement.flyEnabled then
+    if wasFlying and not Config.movement.flyEnabled then
+        hrp.Velocity = Vector3.zero
+        wasFlying = false
+    end
+    if Config.movement.flyEnabled == true then
+        wasFlying = true
         local moveDir = Vector3.zero
         local camCF = Camera.CFrame
         if UserInputService:IsKeyDown(Enum.KeyCode.W) then moveDir += camCF.LookVector end
@@ -352,8 +411,10 @@ local function updateMovement()
         end
         hrp.Velocity = Vector3.zero
     end
-    if Config.movement.infiniteJump and UserInputService:IsKeyDown(Enum.KeyCode.Space) then
-        hrp.Velocity = Vector3.new(hrp.Velocity.X, 50, hrp.Velocity.Z)
+    if Config.movement.infiniteJump == true then
+        if UserInputService:IsKeyDown(Enum.KeyCode.Space) and hrp.Velocity.Y < 40 then
+            hrp.Velocity = Vector3.new(hrp.Velocity.X, 50, hrp.Velocity.Z)
+        end
     end
 end
 
@@ -368,10 +429,7 @@ local function getNearestTarget(range)
         local hrp = getHRP(plr)
         if not hrp then continue end
         local d = (hrp.Position - myPos).Magnitude
-        if d < bestDist then
-            bestDist = d
-            best = plr
-        end
+        if d < bestDist then bestDist = d best = plr end
     end
     return best
 end
@@ -404,11 +462,11 @@ local function setKey(name, key, cb)
     for k,v in pairs(Keybinds) do if v.name==name then Keybinds[k]=nil end end
     Keybinds[key] = {callback=cb, name=name, toggled=false}
 end
-UserInputService.InputBegan:Connect(function(i, gpe)
+track(UserInputService.InputBegan:Connect(function(i, gpe)
     if gpe or i.UserInputType ~= Enum.UserInputType.Keyboard then return end
     local b = Keybinds[i.KeyCode]
     if b and b.callback then b.toggled = not b.toggled safe(b.callback, b.toggled) end
-end)
+end))
 
 --==================== TELEPORT ====================--
 local function tweenTo(pos, dur)
@@ -576,8 +634,8 @@ local function spoofAnimation(id)
     local anim = Instance.new("Animation")
     anim.AnimationId = "rbxassetid://"..tostring(id)
     safe(function()
-        local track = hum:LoadAnimation(anim)
-        track:Play()
+        local track2 = hum:LoadAnimation(anim)
+        track2:Play()
     end)
 end
 local function resetAnimations()
@@ -603,7 +661,7 @@ local function unfreezeAll()
     for plr in pairs(frozen) do unfreezePlayer(plr) end
 end
 
---==================== WATERMARK ====================--
+--==================== WATERMARK + TARGET DISPLAY ====================--
 local wm = newDrawing("Text",{Size=16,Center=false,Outline=true,Visible=false,
     Color=Color3.fromRGB(255,255,255), Text="[VEX]", Position=Vector2.new(20,20)})
 local function updateWatermark()
@@ -611,6 +669,31 @@ local function updateWatermark()
     if not Config.misc.watermark then return end
     wm.Text = string.format("[VEX] K:%d D:%d KD:%.2f  %.0fs",
         Stats.kills, Stats.deaths, getKD(), getSessionTime())
+end
+
+local targetLabel = newDrawing("Text",{
+    Size=16, Center=false, Outline=true, Visible=false,
+    Color=Color3.fromRGB(255, 60, 60),
+    Text="", Position=Vector2.new(20, 50)
+})
+local targetTick = 0
+local function updateTargetDisplay()
+    targetTick += 1
+    if targetTick % 15 ~= 0 then return end
+    if #AimListOrder == 0 then
+        targetLabel.Visible = false
+        return
+    end
+    local names = {}
+    for _, p in ipairs(AimListOrder) do
+        if p.Parent then table.insert(names, p.Name) end
+    end
+    if #names == 0 then
+        targetLabel.Visible = false
+        return
+    end
+    targetLabel.Visible = true
+    targetLabel.Text = "AIM (" .. #names .. "): " .. table.concat(names, ", ")
 end
 
 --==================== MENU GUI ====================--
@@ -628,8 +711,8 @@ local function makeMenu()
 
     local main = Instance.new("Frame")
     main.Name = "Main"
-    main.Size = UDim2.new(0, 460, 0, 520)
-    main.Position = UDim2.new(0.5, -230, 0.5, -260)
+    main.Size = UDim2.new(0, 460, 0, 560)
+    main.Position = UDim2.new(0.5, -230, 0.5, -280)
     main.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
     main.BorderSizePixel = 0
     main.Active = true
@@ -718,7 +801,6 @@ local function makeMenu()
         end)
     end
 
-    -- слайдеры: один общий InputChanged, не по коннекту на каждый
     local activeSlider = nil
     UserInputService.InputChanged:Connect(function(input)
         if activeSlider and input.UserInputType == Enum.UserInputType.MouseMovement then
@@ -808,6 +890,76 @@ local function makeMenu()
     addSlider("Smooth %", 0, 100, function() return math.floor(Config.aimbot.smoothness * 100) end, function(v) Config.aimbot.smoothness = v / 100 end)
     addSlider("Prediction x100", 0, 100, function() return math.floor(Config.aimbot.prediction * 100) end, function(v) Config.aimbot.prediction = v / 100 end)
 
+    section("AIM LIST (клик = добавить/убрать)")
+    local playerListFrame = Instance.new("Frame")
+    playerListFrame.Size = UDim2.new(1, -8, 0, 220)
+    playerListFrame.BackgroundColor3 = Color3.fromRGB(24, 24, 30)
+    playerListFrame.BorderSizePixel = 0
+    playerListFrame.Parent = scroll
+    Instance.new("UICorner", playerListFrame).CornerRadius = UDim.new(0, 6)
+    local pScroll = Instance.new("ScrollingFrame")
+    pScroll.Size = UDim2.new(1, -10, 1, -10)
+    pScroll.Position = UDim2.new(0, 5, 0, 5)
+    pScroll.BackgroundTransparency = 1
+    pScroll.BorderSizePixel = 0
+    pScroll.ScrollBarThickness = 3
+    pScroll.ScrollBarImageColor3 = Color3.fromRGB(255, 60, 60)
+    pScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    pScroll.Parent = playerListFrame
+    local pList = Instance.new("UIListLayout", pScroll)
+    pList.SortOrder = Enum.SortOrder.LayoutOrder
+    pList.Padding = UDim.new(0, 4)
+    pList:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        pScroll.CanvasSize = UDim2.new(0, 0, 0, pList.AbsoluteContentSize.Y + 4)
+    end)
+
+    local function refreshPlayerList()
+        for _, c in ipairs(pScroll:GetChildren()) do
+            if c:IsA("TextButton") then c:Destroy() end
+        end
+        local players = Players:GetPlayers()
+        table.sort(players, function(a, b) return a.Name:lower() < b.Name:lower() end)
+        for _, plr in ipairs(players) do
+            local inList = AimList[plr] == true
+            local btn = Instance.new("TextButton")
+            btn.Size = UDim2.new(1, -4, 0, 28)
+            btn.BackgroundColor3 = inList and Color3.fromRGB(60, 170, 90) or Color3.fromRGB(32, 32, 38)
+            btn.BorderSizePixel = 0
+            btn.Text = (inList and "[AIM] " or "[ + ] ") .. plr.Name
+            btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+            btn.Font = Enum.Font.GothamMedium
+            btn.TextSize = 12
+            btn.TextXAlignment = Enum.TextXAlignment.Left
+            btn.Parent = pScroll
+            Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 4)
+            if plr == LocalPlayer then
+                btn.BackgroundColor3 = Color3.fromRGB(50, 50, 80)
+                btn.Text = "[YOU] " .. plr.Name
+                btn.Active = false
+            else
+                btn.MouseButton1Click:Connect(function()
+                    toggleAimList(plr)
+                    refreshPlayerList()
+                end)
+            end
+        end
+    end
+
+    refreshPlayerList()
+    task.spawn(function()
+        while gui.Parent do
+            task.wait(2)
+            if gui.Enabled then refreshPlayerList() end
+        end
+    end)
+    track(Players.PlayerAdded:Connect(function() refreshPlayerList() end))
+    track(Players.PlayerRemoving:Connect(function(plr)
+        removeFromAimList(plr)
+        refreshPlayerList()
+    end))
+
+    addAction("Clear aim list", function() clearAimList() refreshPlayerList() end)
+
     section("MOVEMENT")
     addToggle("Speed", function() return Config.movement.speedEnabled end, function(v) Config.movement.speedEnabled = v end)
     addSlider("Speed value", 16, 300, function() return Config.movement.speedValue end, function(v) Config.movement.speedValue = v end)
@@ -839,14 +991,12 @@ local function toggleMenu()
     vexMenu.Enabled = _G.__vexMenuOpen
 end
 
--- RightShift = меню. один коннект, без дублей.
-UserInputService.InputBegan:Connect(function(input, gpe)
+track(UserInputService.InputBegan:Connect(function(input, gpe)
     if gpe then return end
     if input.KeyCode == Enum.KeyCode.RightShift then toggleMenu() end
-end)
+end))
 
 --==================== DEFAULT BINDS ====================--
--- меню отдельно на RightShift, тут только игровые тогглы
 setKey("Aimbot", Enum.KeyCode.RightAlt, function() Config.aimbot.enabled = not Config.aimbot.enabled end)
 setKey("Speed", Enum.KeyCode.X, function() Config.movement.speedEnabled = not Config.movement.speedEnabled end)
 setKey("Fly", Enum.KeyCode.F, function() Config.movement.flyEnabled = not Config.movement.flyEnabled end)
@@ -862,33 +1012,35 @@ local function onPlayerAdded(plr)
 end
 local function onPlayerRemoving(plr)
     removeESP(plr)
+    removeFromAimList(plr)
     if Config.misc.joinLogger then notify("LEAVE", plr.Name.." left.", 2) end
 end
 for _,plr in ipairs(Players:GetPlayers()) do onPlayerAdded(plr) end
-Players.PlayerAdded:Connect(onPlayerAdded)
-Players.PlayerRemoving:Connect(onPlayerRemoving)
-LocalPlayer.CharacterAdded:Connect(function()
+track(Players.PlayerAdded:Connect(onPlayerAdded))
+track(Players.PlayerRemoving:Connect(onPlayerRemoving))
+track(LocalPlayer.CharacterAdded:Connect(function()
     task.wait(0.5)
     unfreezeAll()
     noclipCache = {}
-end)
+    wasFlying = false
+end))
 
---==================== MAIN LOOP ====================--
--- RenderStepped только для визуала. movement/anti-afk в Heartbeat.
-RunService.RenderStepped:Connect(function()
+--==================== MAIN LOOPS ====================--
+track(RunService.RenderStepped:Connect(function()
     updateESP()
+    purgeESP()
     updateFovCircle()
     updateWatermark()
-end)
+    updateTargetDisplay()
+end))
 
-RunService.Heartbeat:Connect(function()
+track(RunService.Heartbeat:Connect(function()
     updateMovement()
     updateNoclip()
     updateAimbot()
     updateFarm()
-end)
+end))
 
--- anti-afk вообще отдельно, раз в 5 сек
 task.spawn(function()
     while task.wait(5) do
         updateAntiAfk()
@@ -900,12 +1052,16 @@ getgenv().VexConfig = Config
 getgenv().Vex = {
     Config = Config,
     ESP = {refresh=function() for _,p in ipairs(Players:GetPlayers()) do createESP(p) end end},
-    Aimbot = {getTarget=getClosestToCursor, aim=aimAt},
+    Aimbot = {getTarget=getClosestToCursor, getMulti=getMultiAimTarget, aim=aimAt},
     Movement = {update=updateMovement},
     Farm = {getNearest=getNearestTarget},
     Whitelist = {add=addWhite, check=isWhite, list=Whitelist},
     Blacklist = {add=addBlack, check=isBlack, list=Blacklist},
     Target = {lock=function(p) Target=p end, unlock=function() Target=nil end, get=function() return Target end},
+    AimList = {
+        add=addToAimList, remove=removeFromAimList, toggle=toggleAimList,
+        list=AimList, order=AimListOrder, clear=clearAimList,
+    },
     Teleport = {to=tpToPlayer, toPos=tpToPos, random=tpRandom, tween=tweenTo},
     Camera = {fov=setCameraFOV, third=thirdPerson, first=firstPerson, shake=shakeCamera},
     Anim = {spoof=spoofAnimation, reset=resetAnimations},
@@ -923,4 +1079,4 @@ getgenv().Vex = {
     cleanup = clearDrawings,
 }
 
-print("[VEX] no-lag build loaded. RightShift = menu. go cook, king.")
+print("[VEX] v3 loaded. RightShift = menu. esp cleans, aim list ready.")
