@@ -5,8 +5,8 @@
     ╚██╗ ██╔╝██╔══╝   ██╔██╗
      ╚████╔╝ ███████╗██╔╝ ██╗
       ╚═══╝  ╚══════╝╚═╝  ╚═╝
-    DAHOOD FRAMEWORK — FULL CLEAN BUILD + GUI
-    чистый Roblox API. ~1300 строк. RightControl = меню.
+    DAHOOD FRAMEWORK — NO-LAG BUILD
+    RightShift = меню. троттлинг, кэш, без :Wait() в цикле.
 ]]
 
 --==================== SERVICES ====================--
@@ -26,9 +26,11 @@ local function safe(fn, ...)
     if not ok then return nil end
     return res
 end
+
+-- без :Wait() — иначе весь цикл встаёт пока персонаж грузится
 local function getChar(plr)
     plr = plr or LocalPlayer
-    return plr.Character or plr.CharacterAdded:Wait()
+    return plr and plr.Character
 end
 local function getHRP(plr)
     local char = getChar(plr)
@@ -137,15 +139,22 @@ local function getSkeletonPoints(plr)
         rfoot = v("RightFoot") or v("Right Leg"),
     }
 end
+
+-- ESP троттлится: ~15 fps вместо 60. глазам хватает.
+local espTick = 0
 local function updateESP()
+    espTick += 1
+    if espTick % 4 ~= 0 then return end
     if not Config.esp.enabled then
         for _,o in pairs(espObjects) do hideObj(o) end
         return
     end
     for plr,o in pairs(espObjects) do
-        local hrp = getHRP(plr)
-        local hum = getHum(plr)
-        if plr==LocalPlayer or not hrp or not hum or hum.Health<=0 then hideObj(o) continue end
+        local char = plr.Character
+        if plr==LocalPlayer or not char then hideObj(o) continue end
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if not hrp or not hum or hum.Health<=0 then hideObj(o) continue end
         local dist = (Camera.CFrame.Position - hrp.Position).Magnitude
         if dist > Config.esp.maxDist then hideObj(o) continue end
         local sameTeam = Config.esp.teamCheck and LocalPlayer.Team and plr.Team==LocalPlayer.Team
@@ -191,7 +200,7 @@ local function updateESP()
         end
         o.weapon.Visible = Config.esp.weapon
         if Config.esp.weapon then
-            local wep = plr.Character:FindFirstChildWhichIsA("Tool")
+            local wep = char:FindFirstChildWhichIsA("Tool")
             o.weapon.Text = wep and wep.Name or "—"
             o.weapon.Color = color
             o.weapon.Position = Vector2.new(headV.X, y + height + 18)
@@ -293,6 +302,30 @@ local function updateAimbot()
 end
 
 --==================== MOVEMENT ====================--
+-- noclip кэшируется: GetDescendants зовём один раз, не каждый кадр
+local noclipCache = {}
+local function updateNoclip()
+    local char = LocalPlayer.Character
+    if not char then noclipCache = {} return end
+    if Config.movement.noclip then
+        if next(noclipCache) == nil then
+            for _,v in ipairs(char:GetDescendants()) do
+                if v:IsA("BasePart") then noclipCache[v] = true end
+            end
+        end
+        for part in pairs(noclipCache) do
+            if part.Parent and part.CanCollide then part.CanCollide = false end
+        end
+    else
+        if next(noclipCache) ~= nil then
+            for part in pairs(noclipCache) do
+                if part.Parent then part.CanCollide = true end
+            end
+            noclipCache = {}
+        end
+    end
+end
+
 local function updateMovement()
     local char = LocalPlayer.Character
     if not char then return end
@@ -304,11 +337,6 @@ local function updateMovement()
     end
     if hum.UseJumpPower and hum.JumpPower ~= Config.movement.jumpPower then
         hum.JumpPower = Config.movement.jumpPower
-    end
-    if Config.movement.noclip then
-        for _,v in ipairs(char:GetDescendants()) do
-            if v:IsA("BasePart") and v.CanCollide then v.CanCollide = false end
-        end
     end
     if Config.movement.flyEnabled then
         local moveDir = Vector3.zero
@@ -347,8 +375,11 @@ local function getNearestTarget(range)
     end
     return best
 end
+local farmTick = 0
 local function updateFarm()
     if not Config.farm.autoFarm then return end
+    farmTick += 1
+    if farmTick % 10 ~= 0 then return end
     local t = getNearestTarget(Config.farm.farmRange)
     if not t then return end
     local hrp, tHrp = getHRP(), getHRP(t)
@@ -356,10 +387,15 @@ local function updateFarm()
 end
 
 --==================== ANTI-AFK ====================--
+local lastAfk = 0
 local function updateAntiAfk()
     if not Config.misc.antiAfk then return end
-    VirtualUser:CaptureController()
-    VirtualUser:ClickButton2(Vector2.new())
+    if tick() - lastAfk < 5 then return end
+    lastAfk = tick()
+    pcall(function()
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton2(Vector2.new())
+    end)
 end
 
 --==================== KEYBINDS ====================--
@@ -682,6 +718,17 @@ local function makeMenu()
         end)
     end
 
+    -- слайдеры: один общий InputChanged, не по коннекту на каждый
+    local activeSlider = nil
+    UserInputService.InputChanged:Connect(function(input)
+        if activeSlider and input.UserInputType == Enum.UserInputType.MouseMovement then
+            activeSlider(input.Position.X)
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then activeSlider = nil end
+    end)
+
     local function addSlider(text, min, max, getVal, setVal)
         local frame = Instance.new("Frame")
         frame.Size = UDim2.new(1, -8, 0, 52)
@@ -712,7 +759,6 @@ local function makeMenu()
         fill.BorderSizePixel = 0
         fill.Parent = bar
         Instance.new("UICorner", fill).CornerRadius = UDim.new(1, 0)
-        local dragging = false
         local function updateFromX(x)
             local rel = math.clamp((x - bar.AbsolutePosition.X) / bar.AbsoluteSize.X, 0, 1)
             local val = math.floor(min + (max - min) * rel + 0.5)
@@ -722,17 +768,9 @@ local function makeMenu()
         end
         bar.InputBegan:Connect(function(input)
             if input.UserInputType == Enum.UserInputType.MouseButton1 then
-                dragging = true
+                activeSlider = updateFromX
                 updateFromX(input.Position.X)
             end
-        end)
-        UserInputService.InputChanged:Connect(function(input)
-            if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
-                updateFromX(input.Position.X)
-            end
-        end)
-        UserInputService.InputEnded:Connect(function(input)
-            if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
         end)
     end
 
@@ -800,14 +838,15 @@ local function toggleMenu()
     _G.__vexMenuOpen = not _G.__vexMenuOpen
     vexMenu.Enabled = _G.__vexMenuOpen
 end
+
+-- RightShift = меню. один коннект, без дублей.
 UserInputService.InputBegan:Connect(function(input, gpe)
     if gpe then return end
-    if input.KeyCode == Enum.KeyCode.RightControl then toggleMenu() end
+    if input.KeyCode == Enum.KeyCode.RightShift then toggleMenu() end
 end)
 
 --==================== DEFAULT BINDS ====================--
-setKey("Menu", Enum.KeyCode.RightControl, function() toggleMenu() end)
-setKey("ESP", Enum.KeyCode.RightShift, function() Config.esp.enabled = not Config.esp.enabled end)
+-- меню отдельно на RightShift, тут только игровые тогглы
 setKey("Aimbot", Enum.KeyCode.RightAlt, function() Config.aimbot.enabled = not Config.aimbot.enabled end)
 setKey("Speed", Enum.KeyCode.X, function() Config.movement.speedEnabled = not Config.movement.speedEnabled end)
 setKey("Fly", Enum.KeyCode.F, function() Config.movement.flyEnabled = not Config.movement.flyEnabled end)
@@ -831,19 +870,29 @@ Players.PlayerRemoving:Connect(onPlayerRemoving)
 LocalPlayer.CharacterAdded:Connect(function()
     task.wait(0.5)
     unfreezeAll()
+    noclipCache = {}
 end)
 
 --==================== MAIN LOOP ====================--
-local frame = 0
+-- RenderStepped только для визуала. movement/anti-afk в Heartbeat.
 RunService.RenderStepped:Connect(function()
-    frame += 1
     updateESP()
-    updateAimbot()
-    updateMovement()
-    updateFarm()
     updateFovCircle()
     updateWatermark()
-    if frame % 60 == 0 then updateAntiAfk() end
+end)
+
+RunService.Heartbeat:Connect(function()
+    updateMovement()
+    updateNoclip()
+    updateAimbot()
+    updateFarm()
+end)
+
+-- anti-afk вообще отдельно, раз в 5 сек
+task.spawn(function()
+    while task.wait(5) do
+        updateAntiAfk()
+    end
 end)
 
 --==================== EXPORT ====================--
@@ -874,4 +923,4 @@ getgenv().Vex = {
     cleanup = clearDrawings,
 }
 
-print("[VEX] full build + gui loaded. RightControl = menu. go cook, king.")
+print("[VEX] no-lag build loaded. RightShift = menu. go cook, king.")
