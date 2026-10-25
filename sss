@@ -1,968 +1,307 @@
--- ============================================================
--- VEX DA HOOD // v2.1 "MULTI-LOCK"
--- key: RightShift | ESC closes menu
--- ============================================================
 
-local Players           = game:GetService("Players")
-local RunService        = game:GetService("RunService")
-local UserInputService  = game:GetService("UserInputService")
-local Workspace         = game:GetService("Workspace")
-local HttpService       = game:GetService("HttpService")
-local TweenService      = game:GetService("TweenService")
-local CoreGui           = game:GetService("CoreGui")
-local Lighting          = game:GetService("Lighting")
-local Camera            = Workspace.CurrentCamera
-local LP                = Players.LocalPlayer
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
 
--- ============================================================
--- CONFIG
--- ============================================================
-local C = {
-    aimEnabled=false, aimKey=Enum.KeyCode.E, aimMethod="CamLock",
-    aimPart="Head", aimSmooth=6, aimPrediction=true, aimVelMult=1.0,
-    aimPingMult=1.0, aimDrawFov=true, aimFovRadius=150, aimSticky=true,
-    aimTrigger=false, aimTriggerDelay=0,
-    silEnabled=false, silPart="Head", silWallCheck=true, silFov=200, silDeadCheck=true,
-    espBox=false, espSkeleton=false, espName=false, espDistance=false,
-    espHealth=false, espWeapon=false, espLimit=500, espSkipNpc=true, espBoxFill=true,
-    walkSpeed=16, fly=false, noEquipFly=false, noclip=false, lowGraphics=false,
-    menuKey=Enum.KeyCode.RightShift,
-    -- multi-lock
-    lockedPlayers = {},     -- {[Player] = true}
-    lockMode = "Multi",     -- "Single" | "Multi"
-}
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
--- ============================================================
--- HELPERS
--- ============================================================
-local function char(p) return p and p.Character end
-local function hrp(p) local c=char(p) return c and c:FindFirstChild("HumanoidRootPart") end
-local function hum(p) local c=char(p) return c and c:FindFirstChildOfClass("Humanoid") end
-local function head(p) local c=char(p) return c and c:FindFirstChild("Head") end
-local function alive(p) local h=hum(p) return h and h.Health>0 end
-local function dist(a,b) return (a-b).Magnitude end
-local function screen(pos) local s,on,d=Camera:WorldToViewportPoint(pos) return Vector2.new(s.X,s.Y),on,d end
-
-local function isNPC(p)
-    return p:FindFirstChild("NPC") ~= nil or p:GetAttribute("IsNPC") == true
-end
-
-local function isLocked(p)
-    return C.lockedPlayers[p] == true
-end
-
-local function anyLocked()
-    for _ in pairs(C.lockedPlayers) do return true end
-    return false
-end
-
--- raycast
-local rp = RaycastParams.new()
-rp.FilterType = Enum.RaycastFilterType.Exclude
-rp.IgnoreWater = true
-local function visible(part)
-    if not C.silWallCheck then return true end
-    if not part then return false end
-    rp.FilterDescendantsInstances = {LP.Character, part.Parent}
-    local res = Workspace:Raycast(Camera.CFrame.Position, part.Position - Camera.CFrame.Position, rp)
-    return res == nil
-end
-
--- ============================================================
--- DRAWING UTILS
--- ============================================================
-local Drawings = {}
-local function mkDraw(cls, props)
-    local d = Drawing.new(cls)
-    for k,v in pairs(props) do d[k]=v end
-    table.insert(Drawings, d)
-    return d
-end
-
-local fovCircle = nil
-local function ensureFovCircle()
-    if not fovCircle then
-        fovCircle = mkDraw("Circle", {Thickness=1.5, Color=Color3.fromRGB(255,0,100), Filled=false, Visible=false, Transparency=0.6})
-    end
-    fovCircle.Visible = C.aimEnabled and C.aimDrawFov
-    fovCircle.Radius = C.aimFovRadius
-    fovCircle.Position = UserInputService:GetMouseLocation()
-end
-
--- ============================================================
--- ESP
--- ============================================================
-local ESP = {}
-local function clearESP(p)
-    local t = ESP[p]; if not t then return end
-    for _,d in pairs(t) do pcall(function() d:Remove() end) end
-    ESP[p] = nil
-end
-
-local function initESP(p)
-    clearESP(p)
-    ESP[p] = {
-        box     = mkDraw("Square", {Thickness=1, Color=Color3.fromRGB(255,0,100), Filled=false, Visible=false}),
-        boxFill = mkDraw("Square", {Thickness=0, Color=Color3.fromRGB(255,0,100), Filled=true, Transparency=0.75, Visible=false}),
-        name    = mkDraw("Text", {Size=13, Color=Color3.fromRGB(255,255,255), Center=true, Outline=true, Visible=false}),
-        dist    = mkDraw("Text", {Size=11, Color=Color3.fromRGB(200,200,200), Center=true, Outline=true, Visible=false}),
-        hpBg    = mkDraw("Line", {Thickness=3, Color=Color3.fromRGB(40,40,40), Visible=false}),
-        hpBar   = mkDraw("Line", {Thickness=3, Color=Color3.fromRGB(0,255,100), Visible=false}),
-        weapon  = mkDraw("Text", {Size=11, Color=Color3.fromRGB(255,200,0), Center=true, Outline=true, Visible=false}),
-        lock    = mkDraw("Text", {Size=12, Color=Color3.fromRGB(255,0,100), Center=true, Outline=true, Visible=false}),
-    }
-end
-
-local skelPool = {}
-local function projectSkeleton(ch)
-    local parts = {
-        {"Head","UpperTorso"},{"UpperTorso","LowerTorso"},
-        {"UpperTorso","LeftUpperArm"},{"LeftUpperArm","LeftLowerArm"},
-        {"UpperTorso","RightUpperArm"},{"RightUpperArm","RightLowerArm"},
-        {"LowerTorso","LeftUpperLeg"},{"LeftUpperLeg","LeftLowerLeg"},
-        {"LowerTorso","RightUpperLeg"},{"RightUpperLeg","RightLowerLeg"},
-    }
-    local segs = {}
-    for _,pair in ipairs(parts) do
-        local a = ch:FindFirstChild(pair[1]); local b = ch:FindFirstChild(pair[2])
-        if a and b then
-            local s1,on1,d1 = screen(a.Position)
-            local s2,on2,d2 = screen(b.Position)
-            if on1 and on2 and d1>0 and d2>0 then table.insert(segs,{s1,s2}) end
-        end
-    end
-    return segs
-end
-
-local function updateSkeleton(p, ch, vis)
-    skelPool[p] = skelPool[p] or {}
-    local pool = skelPool[p]
-    local segs = (vis and C.espSkeleton) and projectSkeleton(ch) or {}
-    for i=1,#segs do
-        if not pool[i] then pool[i] = mkDraw("Line", {Thickness=1, Color=Color3.fromRGB(255,0,100), Visible=false}) end
-        pool[i].From = segs[i][1]; pool[i].To = segs[i][2]; pool[i].Visible = true
-    end
-    for i=#segs+1,#pool do pool[i].Visible = false end
-end
-
-local function updateESP()
-    local lpPos = hrp(LP) and hrp(LP).Position or Vector3.zero
-    for _,p in ipairs(Players:GetPlayers()) do
-        if p==LP then continue end
-        local h = hrp(p); local hd = head(p)
-        if not h or not hd then clearESP(p) continue end
-        if C.espSkipNpc and isNPC(p) then clearESP(p) continue end
-        if not ESP[p] then initESP(p) end
-        local e = ESP[p]
-        local hs, onS, depth = screen(hd.Position)
-        local d = dist(lpPos, h.Position)
-        local vis = onS and depth>0 and d<=C.espLimit
-
-        if C.espBox and vis then
-            local top = screen(hd.Position + Vector3.new(0,0.5,0))
-            local bot = screen(h.Position - Vector3.new(0,3,0))
-            if top and bot then
-                local height = math.abs(bot.Y - top.Y)
-                local width = height*0.6
-                e.box.Size = Vector2.new(width,height)
-                e.box.Position = Vector2.new(top.X-width/2, top.Y)
-                e.box.Visible = true
-                if C.espBoxFill then
-                    e.boxFill.Size = e.box.Size; e.boxFill.Position = e.box.Position; e.boxFill.Visible = true
-                else e.boxFill.Visible=false end
-                local human = hum(p)
-                if human then
-                    local ratio = human.Health/human.MaxHealth
-                    e.box.Color = Color3.fromRGB(255*(1-ratio), 255*ratio, 0)
-                    e.boxFill.Color = e.box.Color
-                end
-            end
-        else e.box.Visible=false; e.boxFill.Visible=false end
-
-        if C.espName and vis then
-            e.name.Text = p.DisplayName.." (@"..p.Name..")"
-            e.name.Position = Vector2.new(hs.X, hs.Y - 22)
-            e.name.Visible = true
-        else e.name.Visible=false end
-
-        if C.espDistance and vis then
-            e.dist.Text = string.format("[%d studs]", d)
-            e.dist.Position = Vector2.new(hs.X, e.name.Position.Y + (C.espName and 14 or 0))
-            e.dist.Visible = true
-        else e.dist.Visible=false end
-
-        if C.espHealth and vis and e.box.Visible then
-            local human = hum(p)
-            if human then
-                local ratio = math.clamp(human.Health/human.MaxHealth, 0, 1)
-                local top = screen(hd.Position + Vector3.new(0,0.5,0))
-                local bot = screen(h.Position - Vector3.new(0,3,0))
-                if top and bot then
-                    local hx = e.box.Position.X - 6
-                    e.hpBg.From = Vector2.new(hx, bot.Y); e.hpBg.To = Vector2.new(hx, top.Y); e.hpBg.Visible = true
-                    e.hpBar.From = Vector2.new(hx, bot.Y); e.hpBar.To = Vector2.new(hx, bot.Y - (bot.Y-top.Y)*ratio)
-                    e.hpBar.Color = Color3.fromRGB(255*(1-ratio),255*ratio,0); e.hpBar.Visible = true
-                end
-            end
-        else e.hpBg.Visible=false; e.hpBar.Visible=false end
-
-        if C.espWeapon and vis then
-            local tool = char(p) and char(p):FindFirstChildOfClass("Tool")
-            if tool then
-                e.weapon.Text = tool.Name
-                e.weapon.Position = Vector2.new(hs.X, e.name.Position.Y - 16)
-                e.weapon.Visible = true
-            else e.weapon.Visible = false end
-        else e.weapon.Visible = false end
-
-        -- lock indicator
-        if isLocked(p) and vis then
-            e.lock.Text = "◉ LOCKED"
-            e.lock.Position = Vector2.new(hs.X, hs.Y - 38)
-            e.lock.Visible = true
-        else e.lock.Visible = false end
-
-        updateSkeleton(p, char(p), vis)
-    end
-end
-
--- ============================================================
--- LOCK SYSTEM (multi-lock)
--- ============================================================
-local function lockPlayer(p)
-    if not p or p==LP then return end
-    if C.lockMode == "Single" then
-        C.lockedPlayers = {}
-    end
-    C.lockedPlayers[p] = true
-end
-
-local function unlockPlayer(p)
-    C.lockedPlayers[p] = nil
-end
-
-local function toggleLock(p)
-    if isLocked(p) then unlockPlayer(p) else lockPlayer(p) end
-end
-
-local function cleanLocks()
-    -- remove dead / left players from locks
-    for p in pairs(C.lockedPlayers) do
-        if not p.Parent or not alive(p) then
-            C.lockedPlayers[p] = nil
-        end
-    end
-end
-
--- get preferred target: locked alive > nearest in FOV
-local function findTarget(fov)
-    local mouse = UserInputService:GetMouseLocation()
-    -- 1) locked players first
-    local best, bd = nil, fov
-    for p in pairs(C.lockedPlayers) do
-        if p and p.Parent and alive(p) then
-            local part = char(p) and char(p):FindFirstChild(C.aimPart)
-            if part and visible(part) then
-                local s,on,dp = screen(part.Position)
-                if on and dp>0 then
-                    local dd = (s-mouse).Magnitude
-                    if dd<bd then bd=dd; best={player=p, part=part} end
-                end
-            end
-        end
-    end
-    if best then return best end
-    -- 2) fallback to any player in FOV
-    local closest, cd = nil, fov
-    for _,p in ipairs(Players:GetPlayers()) do
-        if p==LP then continue end
-        if isLocked(p) then continue end
-        if not alive(p) then continue end
-        if C.espSkipNpc and isNPC(p) then continue end
-        local part = char(p) and char(p):FindFirstChild(C.aimPart)
-        if not part then continue end
-        local s,on,dp = screen(part.Position)
-        if not on or dp<=0 then continue end
-        local dd = (s-mouse).Magnitude
-        if dd<cd and visible(part) then cd=dd; closest={player=p, part=part} end
-    end
-    return closest
-end
-
-local function predictPos(p, part)
-    if not C.aimPrediction then return part.Position end
-    local h = hrp(p); if not h then return part.Position end
-    local v = h.AssemblyLinearVelocity
-    local ping = (LP:GetNetworkPing() or 0.05) * C.aimPingMult
-    local d = dist(Camera.CFrame.Position, part.Position)
-    local t = (d / 3000) * C.aimVelMult
-    return part.Position + v*t + v*ping
-end
-
-local function aimAt(target)
-    if not target or not target.part then return end
-    local aimPos = predictPos(target.player, target.part)
-    if C.aimMethod == "CamLock" then
-        Camera.CFrame = Camera.CFrame:Lerp(CFrame.new(Camera.CFrame.Position, aimPos), 1/C.aimSmooth)
-    elseif C.aimMethod == "MouseMove" then
-        local s,on = screen(aimPos)
-        if on then
-            local delta = (s - UserInputService:GetMouseLocation()) / C.aimSmooth
-            if mousemoverel then mousemoverel(delta.X, delta.Y) end
-        end
-    end
-end
-
--- ============================================================
--- SILENT AIM (namecall hook)
--- ============================================================
-local oldNamecall = nil
-local function installSilentHook()
-    if oldNamecall then return end
-    if not hookmetamethod or not getnamecallmethod then return end
-    oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
-        local method = getnamecallmethod()
-        if C.silEnabled and (method=="Fire" or method=="FireServer" or method=="InvokeServer") then
-            local args = {...}
-            if args[1] and typeof(args[1])=="CFrame" then
-                local best, bd = nil, C.silFov
-                local mouse = UserInputService:GetMouseLocation()
-                -- prioritize locked
-                for p in pairs(C.lockedPlayers) do
-                    if p and p.Parent and alive(p) then
-                        local part = char(p) and char(p):FindFirstChild(C.silPart)
-                        if part and visible(part) then
-                            local s,on,dp = screen(part.Position)
-                            if on and dp>0 then
-                                local dd = (s-mouse).Magnitude
-                                if dd<bd then bd=dd; best=part end
-                            end
-                        end
-                    end
-                end
-                -- fallback any player
-                if not best then
-                    for _,p in ipairs(Players:GetPlayers()) do
-                        if p==LP or isLocked(p) then continue end
-                        if not alive(p) then continue end
-                        if C.espSkipNpc and isNPC(p) then continue end
-                        local part = char(p) and char(p):FindFirstChild(C.silPart)
-                        if part and visible(part) then
-                            local s,on,dp = screen(part.Position)
-                            if on and dp>0 then
-                                local dd = (s-mouse).Magnitude
-                                if dd<bd then bd=dd; best=part end
-                            end
-                        end
-                    end
-                end
-                if best then
-                    args[1] = CFrame.new(Camera.CFrame.Position, best.Position)
-                    return oldNamecall(self, unpack(args))
-                end
-            end
-        end
-        return oldNamecall(self, ...)
-    end)
-end
-
--- ============================================================
--- TRIGGERBOT
--- ============================================================
-local nextTrigger = 0
-local function triggerTick()
-    if not C.aimTrigger then return end
-    local now = tick()
-    if now < nextTrigger then return end
-    local mouse = UserInputService:GetMouseLocation()
-    for _,p in ipairs(Players:GetPlayers()) do
-        if p==LP or not alive(p) then continue end
-        local c = char(p); if not c then continue end
-        for _,part in ipairs(c:GetChildren()) do
-            if part:IsA("BasePart") then
-                local s,on,dp = screen(part.Position)
-                if on and dp>0 and (s-mouse).Magnitude < 15 and visible(part) then
-                    if mouse1click then mouse1click() end
-                    nextTrigger = now + C.aimTriggerDelay/1000
-                    return
-                end
-            end
-        end
-    end
-end
-
--- ============================================================
--- MOVEMENT
--- ============================================================
-local FlyBV, FlyBG
-local function setSpeed(v) local h=hum(LP); if h then h.WalkSpeed=v end end
-local function toggleFly(state)
-    local c = char(LP); if not c then return end
-    local h = c:FindFirstChild("HumanoidRootPart")
-    if not h then return end
-    if state then
-        if C.noEquipFly and c:FindFirstChildOfClass("Tool") then return end
-        FlyBV = Instance.new("BodyVelocity"); FlyBV.MaxForce=Vector3.new(1e5,1e5,1e5); FlyBV.Velocity=Vector3.zero; FlyBV.Parent=h
-        FlyBG = Instance.new("BodyGyro"); FlyBG.MaxTorque=Vector3.new(1e5,1e5,1e5); FlyBG.P=1000; FlyBG.Parent=h
-    else
-        if FlyBV then FlyBV:Destroy() end
-        if FlyBG then FlyBG:Destroy() end
-        FlyBV, FlyBG = nil, nil
-    end
-end
-local function flyTick()
-    if not FlyBV or not FlyBG then return end
-    local h = hrp(LP); if not h then return end
-    local mv = Vector3.zero
-    if UserInputService:IsKeyDown(Enum.KeyCode.W) then mv += Camera.CFrame.LookVector end
-    if UserInputService:IsKeyDown(Enum.KeyCode.S) then mv -= Camera.CFrame.LookVector end
-    if UserInputService:IsKeyDown(Enum.KeyCode.A) then mv -= Camera.CFrame.RightVector end
-    if UserInputService:IsKeyDown(Enum.KeyCode.D) then mv += Camera.CFrame.RightVector end
-    if UserInputService:IsKeyDown(Enum.KeyCode.Space) then mv += Vector3.new(0,1,0) end
-    if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then mv -= Vector3.new(0,1,0) end
-    FlyBV.Velocity = mv * 60; FlyBG.CFrame = Camera.CFrame
-end
-local function noclipTick()
-    if not C.noclip then return end
-    local c = char(LP); if not c then return end
-    for _,part in ipairs(c:GetDescendants()) do
-        if part:IsA("BasePart") and part.CanCollide then part.CanCollide=false end
-    end
-end
-
--- ============================================================
--- WAYPOINTS
--- ============================================================
-local function tpTo(pos) local h=hrp(LP); if h then h.CFrame = CFrame.new(pos) end end
-local function saveWaypoint()
-    local h = hrp(LP); if not h then return end
-    table.insert(C.waypoints or {}, {name="WP"..#(C.waypoints or {})+1, pos=h.Position})
-end
-
--- ============================================================
--- UI
--- ============================================================
-if CoreGui:FindFirstChild("VexMenuV2") then CoreGui.VexMenuV2:Destroy() end
+local Purple = Color3.fromRGB(164, 100, 255)
+local Background = Color3.fromRGB(17, 17, 25)
+local Panel = Color3.fromRGB(27, 27, 40)
+local Muted = Color3.fromRGB(155, 155, 175)
 
 local gui = Instance.new("ScreenGui")
-gui.Name = "VexMenuV2"; gui.ResetOnSpawn=false; gui.ZIndexBehavior=Enum.ZIndexBehavior.Sibling
-gui.Parent = CoreGui
+gui.Name = "HoodControl"
+gui.ResetOnSpawn = false
+gui.Parent = PlayerGui
 
-local win = Instance.new("Frame")
-win.Size = UDim2.new(0, 680, 0, 480)
-win.Position = UDim2.new(0.5,-340,0.5,-240)
-win.BackgroundColor3 = Color3.fromRGB(16,16,20)
-win.BorderSizePixel = 0; win.ClipsDescendants = true; win.Visible = true
-win.Parent = gui
-local wc = Instance.new("UICorner"); wc.CornerRadius=UDim.new(0,8); wc.Parent=win
-local ws = Instance.new("UIStroke"); ws.Color=Color3.fromRGB(255,0,100); ws.Thickness=1.5; ws.Transparency=0.3; ws.Parent=win
+local main = Instance.new("Frame")
+main.Size = UDim2.fromOffset(540, 390)
+main.Position = UDim2.new(0.5, -270, 0.5, -195)
+main.BackgroundColor3 = Background
+main.BorderSizePixel = 0
+main.Parent = gui
 
--- title
-local title = Instance.new("Frame")
-title.Size = UDim2.new(1,0,0,36); title.BackgroundColor3 = Color3.fromRGB(24,24,30); title.BorderSizePixel=0; title.Parent = win
-local tc = Instance.new("UICorner"); tc.CornerRadius=UDim.new(0,8); tc.Parent=title
-local tfix = Instance.new("Frame"); tfix.Size=UDim2.new(1,0,0.5,0); tfix.Position=UDim2.new(0,0,0.5,0); tfix.BackgroundColor3=Color3.fromRGB(24,24,30); tfix.BorderSizePixel=0; tfix.Parent=title
+Instance.new("UICorner", main).CornerRadius = UDim.new(0, 14)
 
-local tLabel = Instance.new("TextLabel")
-tLabel.Size = UDim2.new(1,-140,1,0); tLabel.Position=UDim2.new(0,16,0,0)
-tLabel.BackgroundTransparency=1; tLabel.Text = "VEX  //  DA HOOD   ·   v2.1"
-tLabel.TextColor3=Color3.fromRGB(255,255,255); tLabel.Font=Enum.Font.GothamBold; tLabel.TextSize=15
-tLabel.TextXAlignment=Enum.TextXAlignment.Left; tLabel.Parent = title
+local stroke = Instance.new("UIStroke")
+stroke.Color = Purple
+stroke.Transparency = 0.35
+stroke.Thickness = 1.3
+stroke.Parent = main
 
--- LOCK COUNT in title bar
-local lockCount = Instance.new("TextLabel")
-lockCount.Size = UDim2.new(0, 90, 1, 0); lockCount.Position = UDim2.new(1, -136, 0, 0)
-lockCount.BackgroundTransparency=1; lockCount.Text = "locks: 0"
-lockCount.TextColor3=Color3.fromRGB(255,0,100); lockCount.Font=Enum.Font.GothamMedium; lockCount.TextSize=12
-lockCount.TextXAlignment=Enum.TextXAlignment.Right; lockCount.Parent = title
-
--- X close button (BIG and clear)
-local closeBtn = Instance.new("TextButton")
-closeBtn.Size = UDim2.new(0,30,0,26); closeBtn.Position=UDim2.new(1,-38,0,5)
-closeBtn.BackgroundColor3 = Color3.fromRGB(80,20,35); closeBtn.Text = "×"
-closeBtn.TextColor3=Color3.fromRGB(255,120,140); closeBtn.Font=Enum.Font.GothamBold; closeBtn.TextSize=20
-closeBtn.Parent = title
-local cbc = Instance.new("UICorner"); cbc.CornerRadius=UDim.new(0,6); cbc.Parent=closeBtn
-closeBtn.MouseButton1Click:Connect(function() win.Visible = false end)
-
--- minimize? no. just drag
-local dragging, dragStart, startPos
-title.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 then
-        dragging=true; dragStart=input.Position; startPos=win.Position
+local function create(class, parent, properties)
+    local object = Instance.new(class)
+    for key, value in pairs(properties) do
+        object[key] = value
     end
-end)
-UserInputService.InputChanged:Connect(function(input)
-    if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
-        local delta = input.Position - dragStart
-        win.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset+delta.X, startPos.Y.Scale, startPos.Y.Offset+delta.Y)
-    end
-end)
-UserInputService.InputEnded:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging=false end
-end)
-
--- search
-local search = Instance.new("TextBox")
-search.Size = UDim2.new(1,-32,0,26); search.Position=UDim2.new(0,16,0,44)
-search.BackgroundColor3=Color3.fromRGB(26,26,32); search.BorderSizePixel=0
-search.PlaceholderText="search settings..."; search.Text=""
-search.TextColor3=Color3.fromRGB(200,200,200); search.PlaceholderColor3=Color3.fromRGB(120,120,130)
-search.Font=Enum.Font.Gotham; search.TextSize=12; search.ClearTextOnFocus=false
-search.Parent = win
-local sc = Instance.new("UICorner"); sc.CornerRadius=UDim.new(0,6); sc.Parent=search
-local spad = Instance.new("UIPadding"); spad.PaddingLeft=UDim.new(0,10); spad.Parent=search
-
--- tab bar
-local tabBar = Instance.new("Frame")
-tabBar.Size = UDim2.new(0,140,1,-80); tabBar.Position=UDim2.new(0,8,0,78); tabBar.BackgroundTransparency=1; tabBar.Parent = win
-local tLay = Instance.new("UIListLayout"); tLay.Padding=UDim.new(0,4); tLay.Parent=tabBar
-
--- content
-local content = Instance.new("Frame")
-content.Size = UDim2.new(1,-164,1,-88); content.Position=UDim2.new(0,156,0,78)
-content.BackgroundColor3=Color3.fromRGB(20,20,26); content.BorderSizePixel=0; content.ClipsDescendants=true; content.Parent = win
-local cc = Instance.new("UICorner"); cc.CornerRadius=UDim.new(0,6); cc.Parent=content
-
-local tabs = {}
-local tabFrames = {}
-
-local function makeTab(name)
-    local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1,0,0,32); btn.BackgroundColor3 = Color3.fromRGB(26,26,32)
-    btn.BorderSizePixel=0; btn.Text="   "..name; btn.TextColor3=Color3.fromRGB(180,180,190)
-    btn.Font=Enum.Font.GothamMedium; btn.TextSize=13; btn.TextXAlignment=Enum.TextXAlignment.Left
-    btn.Parent=tabBar
-    local bc = Instance.new("UICorner"); bc.CornerRadius=UDim.new(0,5); bc.Parent=btn
-
-    local frame = Instance.new("ScrollingFrame")
-    frame.Size=UDim2.new(1,0,1,0); frame.BackgroundTransparency=1
-    frame.ScrollBarThickness=3; frame.ScrollBarImageColor3=Color3.fromRGB(255,0,100)
-    frame.CanvasSize=UDim2.new(0,0,0,0); frame.Visible=false; frame.Parent=content
-    local lay = Instance.new("UIListLayout"); lay.Padding=UDim.new(0,5); lay.Parent=frame
-    local pad = Instance.new("UIPadding"); pad.PaddingTop=UDim.new(0,8); pad.PaddingLeft=UDim.new(0,8); pad.PaddingRight=UDim.new(0,8); pad.Parent=frame
-
-    tabs[name]=btn; tabFrames[name]=frame
-    btn.MouseButton1Click:Connect(function()
-        for _,b in pairs(tabs) do b.BackgroundColor3=Color3.fromRGB(26,26,32); b.TextColor3=Color3.fromRGB(180,180,190) end
-        for _,f in pairs(tabFrames) do f.Visible=false end
-        btn.BackgroundColor3=Color3.fromRGB(255,0,100); btn.TextColor3=Color3.fromRGB(255,255,255)
-        frame.Visible=true
-    end)
-    return frame
+    object.Parent = parent
+    return object
 end
 
--- widgets
-local function widgetRow(parent, h)
-    local row = Instance.new("Frame")
-    row.Size=UDim2.new(1,-12,0,h or 30); row.BackgroundColor3=Color3.fromRGB(26,26,32)
-    row.BorderSizePixel=0; row.Parent=parent
-    local c=Instance.new("UICorner"); c.CornerRadius=UDim.new(0,5); c.Parent=row
-    row:SetAttribute("BaseName","")
-    return row
-end
+local header = create("TextLabel", main, {
+    Size = UDim2.new(1, -24, 0, 48),
+    Position = UDim2.fromOffset(16, 5),
+    BackgroundTransparency = 1,
+    Text = "HOOD  /  CONTROL",
+    TextColor3 = Color3.new(1, 1, 1),
+    TextSize = 21,
+    Font = Enum.Font.GothamBold,
+    TextXAlignment = Enum.TextXAlignment.Left
+})
 
-local function makeToggle(parent, text, key, cb)
-    local row = widgetRow(parent, 30); row:SetAttribute("BaseName", text:lower())
-    local lbl = Instance.new("TextLabel"); lbl.Size=UDim2.new(1,-70,1,0); lbl.Position=UDim2.new(0,12,0,0)
-    lbl.BackgroundTransparency=1; lbl.Text=text; lbl.TextColor3=Color3.fromRGB(200,200,210)
-    lbl.Font=Enum.Font.GothamMedium; lbl.TextSize=12; lbl.TextXAlignment=Enum.TextXAlignment.Left; lbl.Parent=row
-    local sw = Instance.new("Frame"); sw.Size=UDim2.new(0,38,0,20); sw.Position=UDim2.new(1,-48,0.5,-10)
-    sw.BackgroundColor3 = C[key] and Color3.fromRGB(255,0,100) or Color3.fromRGB(40,40,48); sw.Parent=row
-    local swc=Instance.new("UICorner"); swc.CornerRadius=UDim.new(0,10); swc.Parent=sw
-    local knob = Instance.new("Frame"); knob.Size=UDim2.new(0,16,0,16)
-    knob.Position = UDim2.new(0, C[key] and 20 or 2, 0.5, -8)
-    knob.BackgroundColor3=Color3.fromRGB(255,255,255); knob.Parent=sw
-    local knc=Instance.new("UICorner"); knc.CornerRadius=UDim.new(0,8); knc.Parent=knob
-    local btn = Instance.new("TextButton"); btn.Size=UDim2.new(1,0,1,0); btn.BackgroundTransparency=1; btn.Text=""; btn.Parent=row
-    btn.MouseButton1Click:Connect(function()
-        C[key] = not C[key]
-        TweenService:Create(sw, TweenInfo.new(0.18), {BackgroundColor3 = C[key] and Color3.fromRGB(255,0,100) or Color3.fromRGB(40,40,48)}):Play()
-        TweenService:Create(knob, TweenInfo.new(0.18), {Position = UDim2.new(0, C[key] and 20 or 2, 0.5, -8)}):Play()
-        if cb then cb(C[key]) end
-    end)
-end
+local subtitle = create("TextLabel", main, {
+    Size = UDim2.new(1, -24, 0, 20),
+    Position = UDim2.fromOffset(16, 45),
+    BackgroundTransparency = 1,
+    Text = "PLAYER BROWSER  •  TRAINING TOOLS",
+    TextColor3 = Purple,
+    TextSize = 10,
+    Font = Enum.Font.GothamBold,
+    TextXAlignment = Enum.TextXAlignment.Left
+})
 
-local function makeSlider(parent, text, key, min, max, cb)
-    local row = widgetRow(parent, 46); row:SetAttribute("BaseName", text:lower())
-    local lbl = Instance.new("TextLabel"); lbl.Size=UDim2.new(1,-20,0,18); lbl.Position=UDim2.new(0,12,0,3)
-    lbl.BackgroundTransparency=1; lbl.TextColor3=Color3.fromRGB(200,200,210); lbl.Font=Enum.Font.GothamMedium; lbl.TextSize=12
-    lbl.TextXAlignment=Enum.TextXAlignment.Left; lbl.Text = text.."  ·  "..tostring(C[key]); lbl.Parent=row
-    local bar = Instance.new("Frame"); bar.Size=UDim2.new(1,-24,0,6); bar.Position=UDim2.new(0,12,0,28)
-    bar.BackgroundColor3=Color3.fromRGB(40,40,48); bar.Parent=row
-    local barc=Instance.new("UICorner"); barc.CornerRadius=UDim.new(0,3); barc.Parent=bar
-    local fill = Instance.new("Frame"); fill.Size=UDim2.new((C[key]-min)/(max-min),0,1,0)
-    fill.BackgroundColor3=Color3.fromRGB(255,0,100); fill.Parent=bar
-    local fillc=Instance.new("UICorner"); fillc.CornerRadius=UDim.new(0,3); fillc.Parent=fill
-    local dragBtn = Instance.new("TextButton"); dragBtn.Size=UDim2.new(1,0,3,0); dragBtn.Position=UDim2.new(0,0,-1,0)
-    dragBtn.BackgroundTransparency=1; dragBtn.Text=""; dragBtn.Parent=bar
-    local dragging=false
-    local function setFromX(x)
-        local rel = math.clamp((x-bar.AbsolutePosition.X)/bar.AbsoluteSize.X,0,1)
-        local val = min + (max-min)*rel
-        val = (max-min)>20 and math.floor(val+0.5) or math.floor(val*10+0.5)/10
-        C[key]=val; fill.Size=UDim2.new(rel,0,1,0); lbl.Text = text.."  ·  "..tostring(val)
-        if cb then cb(val) end
-    end
-    dragBtn.InputBegan:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseButton1 then dragging=true end end)
-    UserInputService.InputChanged:Connect(function(i) if dragging and i.UserInputType==Enum.UserInputType.MouseMovement then setFromX(i.Position.X) end end)
-    UserInputService.InputEnded:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseButton1 then dragging=false end end)
-end
+local search = create("TextBox", main, {
+    Size = UDim2.new(1, -32, 0, 36),
+    Position = UDim2.fromOffset(16, 78),
+    BackgroundColor3 = Panel,
+    TextColor3 = Color3.new(1, 1, 1),
+    PlaceholderText = "Search display name or username...",
+    PlaceholderColor3 = Muted,
+    Text = "",
+    TextSize = 12,
+    Font = Enum.Font.Gotham,
+    ClearTextOnFocus = false
+})
+Instance.new("UICorner", search).CornerRadius = UDim.new(0, 8)
 
-local function makeDropdown(parent, text, key, options, cb)
-    local row = widgetRow(parent, 30); row:SetAttribute("BaseName", text:lower())
-    local lbl = Instance.new("TextLabel"); lbl.Size=UDim2.new(0.5,-12,1,0); lbl.Position=UDim2.new(0,12,0,0)
-    lbl.BackgroundTransparency=1; lbl.Text=text; lbl.TextColor3=Color3.fromRGB(200,200,210)
-    lbl.Font=Enum.Font.GothamMedium; lbl.TextSize=12; lbl.TextXAlignment=Enum.TextXAlignment.Left; lbl.Parent=row
-    local btn = Instance.new("TextButton"); btn.Size=UDim2.new(0.45,-6,0,22); btn.Position=UDim2.new(0.55,0,0.5,-11)
-    btn.BackgroundColor3=Color3.fromRGB(40,40,48); btn.BorderSizePixel=0; btn.Text=tostring(C[key])
-    btn.TextColor3=Color3.fromRGB(255,255,255); btn.Font=Enum.Font.Gotham; btn.TextSize=11; btn.Parent=row
-    local bc=Instance.new("UICorner"); bc.CornerRadius=UDim.new(0,4); bc.Parent=btn
-    local idx=1; for i,o in ipairs(options) do if o==C[key] then idx=i break end end
-    btn.MouseButton1Click:Connect(function()
-        idx = idx % #options + 1; C[key]=options[idx]; btn.Text=options[idx]
-        if cb then cb(options[idx]) end
-    end)
-end
+local list = create("ScrollingFrame", main, {
+    Size = UDim2.new(0.56, -18, 1, -145),
+    Position = UDim2.fromOffset(16, 124),
+    BackgroundColor3 = Panel,
+    BorderSizePixel = 0,
+    ScrollBarThickness = 3,
+    ScrollBarImageColor3 = Purple,
+    CanvasSize = UDim2.new()
+})
+Instance.new("UICorner", list).CornerRadius = UDim.new(0, 9)
 
-local function makeButton(parent, text, cb)
-    local row = widgetRow(parent, 30); row:SetAttribute("BaseName", text:lower())
-    local btn = Instance.new("TextButton"); btn.Size=UDim2.new(1,-12,1,0); btn.Position=UDim2.new(0,6,0,0)
-    btn.BackgroundColor3=Color3.fromRGB(40,40,48); btn.BorderSizePixel=0; btn.Text=text
-    btn.TextColor3=Color3.fromRGB(230,230,240); btn.Font=Enum.Font.GothamMedium; btn.TextSize=12; btn.Parent=row
-    local bc=Instance.new("UICorner"); bc.CornerRadius=UDim.new(0,4); bc.Parent=btn
-    btn.MouseButton1Click:Connect(cb)
-end
+local layout = create("UIListLayout", list, {
+    Padding = UDim.new(0, 5),
+    SortOrder = Enum.SortOrder.Name
+})
 
-local function makeKeybind(parent, text, key)
-    local row = widgetRow(parent, 30); row:SetAttribute("BaseName", text:lower())
-    local lbl = Instance.new("TextLabel"); lbl.Size=UDim2.new(0.5,-12,1,0); lbl.Position=UDim2.new(0,12,0,0)
-    lbl.BackgroundTransparency=1; lbl.Text=text; lbl.TextColor3=Color3.fromRGB(200,200,210)
-    lbl.Font=Enum.Font.GothamMedium; lbl.TextSize=12; lbl.TextXAlignment=Enum.TextXAlignment.Left; lbl.Parent=row
-    local btn = Instance.new("TextButton"); btn.Size=UDim2.new(0.45,-6,0,22); btn.Position=UDim2.new(0.55,0,0.5,-11)
-    btn.BackgroundColor3=Color3.fromRGB(40,40,48); btn.BorderSizePixel=0; btn.Text=tostring(C[key].Name)
-    btn.TextColor3=Color3.fromRGB(255,255,255); btn.Font=Enum.Font.Gotham; btn.TextSize=11; btn.Parent=row
-    local bc=Instance.new("UICorner"); bc.CornerRadius=UDim.new(0,4); bc.Parent=btn
-    local listening=false
-    btn.MouseButton1Click:Connect(function() listening=true; btn.Text="press..." end)
-    UserInputService.InputBegan:Connect(function(i,gp)
-        if listening and not gp then C[key]=i.KeyCode; btn.Text=i.KeyCode.Name; listening=false end
+create("UIPadding", list, {
+    PaddingTop = UDim.new(0, 7),
+    PaddingLeft = UDim.new(0, 7),
+    PaddingRight = UDim.new(0, 7),
+    PaddingBottom = UDim.new(0, 7)
+})
+
+local tools = create("Frame", main, {
+    Size = UDim2.new(0.44, -8, 1, -145),
+    Position = UDim2.new(0.56, 2, 0, 124),
+    BackgroundTransparency = 1
+})
+
+local selectedLabel = create("TextLabel", tools, {
+    Size = UDim2.new(1, 0, 0, 50),
+    BackgroundColor3 = Panel,
+    Text = "SELECT A PLAYER",
+    TextColor3 = Color3.new(1, 1, 1),
+    TextSize = 13,
+    Font = Enum.Font.GothamBold,
+    TextWrapped = true
+})
+Instance.new("UICorner", selectedLabel).CornerRadius = UDim.new(0, 9)
+
+local status = create("TextLabel", tools, {
+    Size = UDim2.new(1, 0, 0, 25),
+    Position = UDim2.fromOffset(0, 58),
+    BackgroundTransparency = 1,
+    Text = "TRAINING READY",
+    TextColor3 = Purple,
+    TextSize = 11,
+    Font = Enum.Font.GothamBold
+})
+
+local reloadButton = create("TextButton", tools, {
+    Size = UDim2.new(1, 0, 0, 40),
+    Position = UDim2.fromOffset(0, 90),
+    BackgroundColor3 = Purple,
+    Text = "START RELOAD DRILL",
+    TextColor3 = Color3.new(1, 1, 1),
+    TextSize = 11,
+    Font = Enum.Font.GothamBold,
+    AutoButtonColor = false
+})
+Instance.new("UICorner", reloadButton).CornerRadius = UDim.new(0, 8)
+
+local duration = create("TextBox", tools, {
+    Size = UDim2.new(1, 0, 0, 35),
+    Position = UDim2.fromOffset(0, 140),
+    BackgroundColor3 = Panel,
+    Text = "1.5",
+    TextColor3 = Color3.new(1, 1, 1),
+    PlaceholderText = "Duration in seconds",
+    TextSize = 12,
+    Font = Enum.Font.Gotham,
+    ClearTextOnFocus = false
+})
+Instance.new("UICorner", duration).CornerRadius = UDim.new(0, 8)
+
+local footer = create("TextLabel", main, {
+    Size = UDim2.new(1, -32, 0, 20),
+    Position = UDim2.new(0, 16, 1, -25),
+    BackgroundTransparency = 1,
+    Text = "HOOD CONTROL  /  LOCAL TRAINING UI",
+    TextColor3 = Muted,
+    TextSize = 10,
+    Font = Enum.Font.Gotham,
+    TextXAlignment = Enum.TextXAlignment.Left
+})
+
+local selectedPlayer = nil
+local running = false
+local refresh
+
+local function makePlayerButton(player)
+    local button = create("TextButton", list, {
+        Name = player.Name,
+        Size = UDim2.new(1, -4, 0, 48),
+        BackgroundColor3 = Color3.fromRGB(36, 34, 51),
+        Text = "",
+        AutoButtonColor = false,
+        LayoutOrder = 0
+    })
+    Instance.new("UICorner", button).CornerRadius = UDim.new(0, 7)
+
+    create("TextLabel", button, {
+        Size = UDim2.new(1, -12, 0, 22),
+        Position = UDim2.fromOffset(8, 4),
+        BackgroundTransparency = 1,
+        Text = player.DisplayName,
+        TextColor3 = Color3.new(1, 1, 1),
+        TextSize = 12,
+        Font = Enum.Font.GothamBold,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd
+    })
+
+    create("TextLabel", button, {
+        Size = UDim2.new(1, -12, 0, 16),
+        Position = UDim2.fromOffset(8, 26),
+        BackgroundTransparency = 1,
+        Text = "@" .. player.Name,
+        TextColor3 = Muted,
+        TextSize = 10,
+        Font = Enum.Font.Gotham,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd
+    })
+
+    button.MouseButton1Click:Connect(function()
+        selectedPlayer = player
+        selectedLabel.Text = player.DisplayName .. "\n@" .. player.Name
+        status.Text = "PLAYER SELECTED"
     end)
 end
 
--- ============================================================
--- PLAYERS TAB (multi-lock)
--- ============================================================
-local fPlayers = makeTab("Players")
-
--- top controls
-local playerControls = Instance.new("Frame")
-playerControls.Size = UDim2.new(1, -12, 0, 60)
-playerControls.BackgroundColor3 = Color3.fromRGB(22,22,28)
-playerControls.BorderSizePixel = 0
-playerControls.Parent = fPlayers
-local pcc = Instance.new("UICorner"); pcc.CornerRadius = UDim.new(0,5); pcc.Parent = playerControls
-playerControls:SetAttribute("BaseName", "players controls")
-
-local modeLbl = Instance.new("TextLabel")
-modeLbl.Size = UDim2.new(1, -20, 0, 18)
-modeLbl.Position = UDim2.new(0, 10, 0, 4)
-modeLbl.BackgroundTransparency = 1
-modeLbl.Text = "lock mode  ·  " .. C.lockMode
-modeLbl.TextColor3 = Color3.fromRGB(200,200,210)
-modeLbl.Font = Enum.Font.GothamMedium
-modeLbl.TextSize = 11
-modeLbl.TextXAlignment = Enum.TextXAlignment.Left
-modeLbl.Parent = playerControls
-
-local modeBtn = Instance.new("TextButton")
-modeBtn.Size = UDim2.new(0.4, -10, 0, 20)
-modeBtn.Position = UDim2.new(0.6, 0, 0, 4)
-modeBtn.BackgroundColor3 = Color3.fromRGB(40,40,48)
-modeBtn.BorderSizePixel = 0
-modeBtn.Text = C.lockMode
-modeBtn.TextColor3 = Color3.fromRGB(255,255,255)
-modeBtn.Font = Enum.Font.Gotham
-modeBtn.TextSize = 11
-modeBtn.Parent = playerControls
-local mbc = Instance.new("UICorner"); mbc.CornerRadius = UDim.new(0,4); mbc.Parent = modeBtn
-modeBtn.MouseButton1Click:Connect(function()
-    C.lockMode = (C.lockMode == "Single") and "Multi" or "Single"
-    modeBtn.Text = C.lockMode
-    modeLbl.Text = "lock mode  ·  " .. C.lockMode
-    if C.lockMode == "Single" then
-        -- keep only nearest
-        local keep = nil
-        for p in pairs(C.lockedPlayers) do keep = p break end
-        C.lockedPlayers = {}
-        if keep then C.lockedPlayers[keep] = true end
-    end
-end)
-
-local clearBtn = Instance.new("TextButton")
-clearBtn.Size = UDim2.new(0.55, -10, 0, 20)
-clearBtn.Position = UDim2.new(0.02, 0, 0, 28)
-clearBtn.BackgroundColor3 = Color3.fromRGB(60,20,30)
-clearBtn.BorderSizePixel = 0
-clearBtn.Text = "clear all locks"
-clearBtn.TextColor3 = Color3.fromRGB(255,120,140)
-clearBtn.Font = Enum.Font.GothamMedium
-clearBtn.TextSize = 11
-clearBtn.Parent = playerControls
-local clbc = Instance.new("UICorner"); clbc.CornerRadius = UDim.new(0,4); clbc.Parent = clearBtn
-clearBtn.MouseButton1Click:Connect(function()
-    C.lockedPlayers = {}
-    updateLockCount()
-end)
-
-local function updateLockCount()
-    local n = 0
-    for _ in pairs(C.lockedPlayers) do n = n + 1 end
-    lockCount.Text = "locks: " .. n
-end
-
--- player list container
-local playerList = Instance.new("ScrollingFrame")
-playerList.Size = UDim2.new(1, -12, 1, -72)
-playerList.Position = UDim2.new(0, 0, 0, 68)
-playerList.BackgroundTransparency = 1
-playerList.ScrollBarThickness = 3
-playerList.ScrollBarImageColor3 = Color3.fromRGB(255,0,100)
-playerList.CanvasSize = UDim2.new(0,0,0,0)
-playerList.Parent = fPlayers
-
-local plLay = Instance.new("UIListLayout"); plLay.Padding = UDim.new(0,4); plLay.Parent = playerList
-
-local function refreshPlayerList()
-    -- clear children except layout
-    for _,ch in ipairs(playerList:GetChildren()) do
-        if ch:IsA("Frame") then ch:Destroy() end
-    end
-    updateLockCount()
-
-    local players = Players:GetPlayers()
-    table.sort(players, function(a,b)
-        -- locked first, then alphabetical
-        local al, bl = isLocked(a), isLocked(b)
-        if al ~= bl then return al end
-        return a.Name:lower() < b.Name:lower()
-    end)
-
-    for _,p in ipairs(players) do
-        if p == LP then continue end
-        local isL = isLocked(p)
-        local isDead = not alive(p)
-
-        local row = Instance.new("Frame")
-        row.Size = UDim2.new(1, 0, 0, 32)
-        row.BackgroundColor3 = isL and Color3.fromRGB(50,20,30) or Color3.fromRGB(26,26,32)
-        row.BorderSizePixel = 0
-        row.Parent = playerList
-        local rc = Instance.new("UICorner"); rc.CornerRadius = UDim.new(0,5); rc.Parent = row
-
-        -- lock indicator dot
-        local dot = Instance.new("Frame")
-        dot.Size = UDim2.new(0, 10, 0, 10)
-        dot.Position = UDim2.new(0, 10, 0.5, -5)
-        dot.BackgroundColor3 = isL and Color3.fromRGB(255,0,100) or (isDead and Color3.fromRGB(80,80,80) or Color3.fromRGB(80,80,90))
-        dot.Parent = row
-        local dc = Instance.new("UICorner"); dc.CornerRadius = UDim.new(0,5); dc.Parent = dot
-
-        -- name label
-        local nl = Instance.new("TextLabel")
-        nl.Size = UDim2.new(1, -130, 0.5, 0)
-        nl.Position = UDim2.new(0, 26, 0, 2)
-        nl.BackgroundTransparency = 1
-        nl.Text = p.DisplayName
-        nl.TextColor3 = isDead and Color3.fromRGB(120,120,120) or Color3.fromRGB(230,230,240)
-        nl.Font = Enum.Font.GothamMedium
-        nl.TextSize = 12
-        nl.TextXAlignment = Enum.TextXAlignment.Left
-        nl.Parent = row
-
-        -- @username
-        local ul = Instance.new("TextLabel")
-        ul.Size = UDim2.new(1, -130, 0.5, 0)
-        ul.Position = UDim2.new(0, 26, 0.5, 0)
-        ul.BackgroundTransparency = 1
-        ul.Text = "@" .. p.Name .. (isDead and "  ·  dead" or "  ·  " .. math.floor(dist(hrp(LP) and hrp(LP).Position or Vector3.zero, hrp(p) and hrp(p).Position or Vector3.zero)) .. " studs")
-        ul.TextColor3 = Color3.fromRGB(130,130,140)
-        ul.Font = Enum.Font.Gotham
-        ul.TextSize = 10
-        ul.TextXAlignment = Enum.TextXAlignment.Left
-        ul.Parent = row
-
-        -- LOCK button
-        local lockBtn = Instance.new("TextButton")
-        lockBtn.Size = UDim2.new(0, 80, 0, 24)
-        lockBtn.Position = UDim2.new(1, -88, 0.5, -12)
-        lockBtn.BackgroundColor3 = isL and Color3.fromRGB(255,0,100) or Color3.fromRGB(40,40,48)
-        lockBtn.BorderSizePixel = 0
-        lockBtn.Text = isL and "UNLOCK" or "LOCK"
-        lockBtn.TextColor3 = isL and Color3.fromRGB(255,255,255) or Color3.fromRGB(200,200,210)
-        lockBtn.Font = Enum.Font.GothamBold
-        lockBtn.TextSize = 11
-        lockBtn.Parent = row
-        local lbc = Instance.new("UICorner"); lbc.CornerRadius = UDim.new(0,4); lbc.Parent = lockBtn
-
-        lockBtn.MouseButton1Click:Connect(function()
-            if isLocked(p) then
-                unlockPlayer(p)
-            else
-                lockPlayer(p)
-            end
-            refreshPlayerList()
-        end)
-    end
-
-    -- empty state
-    if #players <= 1 then
-        local empty = Instance.new("TextLabel")
-        empty.Size = UDim2.new(1, -20, 0, 40)
-        empty.BackgroundTransparency = 1
-        empty.Text = "no other players in server"
-        empty.TextColor3 = Color3.fromRGB(120,120,130)
-        empty.Font = Enum.Font.Gotham
-        empty.TextSize = 12
-        empty.Parent = playerList
-    end
-end
-
--- auto refresh player list every 2 sec
-task.spawn(function()
-    while gui.Parent do
-        pcall(refreshPlayerList)
-        task.wait(2)
-    end
-end)
-
--- ============================================================
--- BUILD TABS
--- ============================================================
--- (Players tab already created above as fPlayers)
-
-local f1 = makeTab("Aimbot")
-makeToggle(f1, "Aimbot Enabled", "aimEnabled")
-makeKeybind(f1, "Aimbot Key", "aimKey")
-makeDropdown(f1, "Method", "aimMethod", {"CamLock","MouseMove"})
-makeDropdown(f1, "Target Part", "aimPart", {"Head","UpperTorso","LowerTorso","HumanoidRootPart"})
-makeSlider(f1, "Smoothness", "aimSmooth", 1, 20)
-makeToggle(f1, "Prediction", "aimPrediction")
-makeSlider(f1, "Velocity Mult", "aimVelMult", 0.1, 3)
-makeSlider(f1, "Ping Mult", "aimPingMult", 0.1, 3)
-makeToggle(f1, "Show FOV Circle", "aimDrawFov")
-makeSlider(f1, "FOV Radius", "aimFovRadius", 30, 600)
-makeToggle(f1, "Sticky Aimbot", "aimSticky")
-makeToggle(f1, "Triggerbot", "aimTrigger")
-makeSlider(f1, "Trigger Delay ms", "aimTriggerDelay", 0, 300)
-
-local f2 = makeTab("Silent")
-makeToggle(f2, "Silent Enabled", "silEnabled")
-makeDropdown(f2, "Hitpart", "silPart", {"Head","UpperTorso","LowerTorso","HumanoidRootPart"})
-makeToggle(f2, "Wall Check", "silWallCheck")
-makeSlider(f2, "Silent FOV", "silFov", 30, 600)
-makeToggle(f2, "Dead Check", "silDeadCheck")
-
-local f3 = makeTab("Visuals")
-makeToggle(f3, "Box ESP", "espBox")
-makeToggle(f3, "Box Fill", "espBoxFill")
-makeToggle(f3, "Skeleton", "espSkeleton")
-makeToggle(f3, "Name", "espName")
-makeToggle(f3, "Distance", "espDistance")
-makeToggle(f3, "Health Bar", "espHealth")
-makeToggle(f3, "Weapon", "espWeapon")
-makeToggle(f3, "Skip NPC", "espSkipNpc")
-makeSlider(f3, "Max Distance", "espLimit", 50, 2000)
-
-local f4 = makeTab("Movement")
-makeSlider(f4, "WalkSpeed", "walkSpeed", 16, 200, function(v) setSpeed(v) end)
-makeToggle(f4, "Fly", "fly", function(v) toggleFly(v) end)
-makeToggle(f4, "No Equip Fly", "noEquipFly")
-makeToggle(f4, "NoClip", "noclip")
-makeToggle(f4, "Low Graphics", "lowGraphics", function(v)
-    if v then
-        Lighting.GlobalShadows=false; Lighting.FogEnd=1e6
-        pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level01 end)
-    else
-        Lighting.GlobalShadows=true
-        pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level10 end)
-    end
-end)
-
-local f5 = makeTab("Waypoints")
-local function refreshWaypoints()
-    for _,ch in ipairs(f5:GetChildren()) do
-        if ch:IsA("Frame") and ch:GetAttribute("wpItem") then ch:Destroy() end
-    end
-    for i,wp in ipairs(C.waypoints) do
-        local row = widgetRow(f5, 28); row:SetAttribute("wpItem", true)
-        local b = Instance.new("TextButton"); b.Size=UDim2.new(0.7,-12,1,-4); b.Position=UDim2.new(0,6,0,2)
-        b.BackgroundColor3=Color3.fromRGB(40,40,48); b.BorderSizePixel=0; b.Text="  TP "..wp.name
-        b.TextColor3=Color3.fromRGB(230,230,240); b.Font=Enum.Font.GothamMedium; b.TextSize=12
-        b.TextXAlignment=Enum.TextXAlignment.Left; b.Parent=row
-        local bc=Instance.new("UICorner"); bc.CornerRadius=UDim.new(0,4); bc.Parent=b
-        b.MouseButton1Click:Connect(function() tpTo(wp.pos) end)
-        local del = Instance.new("TextButton"); del.Size=UDim2.new(0.25,-12,1,-4); del.Position=UDim2.new(0.7,0,0,2)
-        del.BackgroundColor3=Color3.fromRGB(60,25,30); del.BorderSizePixel=0; del.Text="DEL"
-        del.TextColor3=Color3.fromRGB(255,120,140); del.Font=Enum.Font.GothamBold; del.TextSize=11; del.Parent=row
-        local dc=Instance.new("UICorner"); dc.CornerRadius=UDim.new(0,4); dc.Parent=del
-        del.MouseButton1Click:Connect(function() table.remove(C.waypoints,i); refreshWaypoints() end)
-    end
-end
-makeButton(f5, "+ Save Current Position", function() saveWaypoint(); refreshWaypoints() end)
-
--- search filter
-search:GetPropertyChangedSignal("Text"):Connect(function()
-    local q = search.Text:lower()
-    for _,f in pairs(tabFrames) do
-        for _,ch in ipairs(f:GetChildren()) do
-            if ch:IsA("Frame") and ch:GetAttribute("BaseName") then
-                local base = ch:GetAttribute("BaseName")
-                ch.Visible = q=="" or base:find(q,1,true)~=nil
-            end
+refresh = function()
+    for _, child in ipairs(list:GetChildren()) do
+        if child:IsA("TextButton") then
+            child:Destroy()
         end
     end
-end)
 
--- default tab
-tabs["Aimbot"].MouseButton1Click:Fire()
-refreshWaypoints()
-refreshPlayerList()
+    local query = string.lower(search.Text)
 
--- ============================================================
--- MENU TOGGLE + ESC CLOSE
--- ============================================================
-UserInputService.InputBegan:Connect(function(i,gp)
-    if gp then return end
-    if i.KeyCode == C.menuKey then
-        win.Visible = not win.Visible
-    end
-    if i.KeyCode == Enum.KeyCode.Escape and win.Visible then
-        win.Visible = false
-    end
-end)
+    for _, player in ipairs(Players:GetPlayers()) do
+        local matches = string.find(
+            string.lower(player.Name .. " " .. player.DisplayName),
+            query,
+            1,
+            true
+        )
 
--- ============================================================
--- MAIN LOOP
--- ============================================================
-RunService.RenderStepped:Connect(function()
-    if not LP.Character then return end
-
-    -- clean dead locks each frame
-    cleanLocks()
-
-    if C.aimEnabled and UserInputService:IsKeyDown(C.aimKey) then
-        local target = findTarget(C.aimFovRadius)
-        if target then aimAt(target) end
+        if matches then
+            makePlayerButton(player)
+        end
     end
 
-    triggerTick()
-    updateESP()
-    flyTick()
-    noclipTick()
-    ensureFovCircle()
+    task.defer(function()
+        list.CanvasSize = UDim2.fromOffset(0, layout.AbsoluteContentSize.Y + 14)
+    end)
+end
+
+search:GetPropertyChangedSignal("Text"):Connect(refresh)
+Players.PlayerAdded:Connect(refresh)
+Players.PlayerRemoving:Connect(function(player)
+    if selectedPlayer == player then
+        selectedPlayer = nil
+        selectedLabel.Text = "SELECT A PLAYER"
+        status.Text = "PLAYER LEFT"
+    end
+    refresh()
 end)
 
-installSilentHook()
+reloadButton.MouseButton1Click:Connect(function()
+    if running then
+        return
+    end
 
-print("[VEX] v2.1 loaded — Players tab added. RightShift / ESC to toggle menu.")
+    local seconds = tonumber(duration.Text)
+    if not seconds or seconds < 0.1 or seconds > 10 then
+        status.Text = "USE 0.1 - 10 SECONDS"
+        return
+    end
+
+    running = true
+    reloadButton.Text = "RELOADING..."
+    status.Text = "TRAINING IN PROGRESS"
+
+    local started = os.clock()
+    while os.clock() - started < seconds do
+        status.Text = string.format(
+            "TIME LEFT: %.1f S",
+            math.max(0, seconds - (os.clock() - started))
+        )
+        task.wait(0.05)
+    end
+
+    status.Text = "DRILL COMPLETE"
+    reloadButton.Text = "START RELOAD DRILL"
+    running = false
+end)
+
+local dragging = false
+local dragStart
+local startPosition
+
+header.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        dragging = true
+        dragStart = input.Position
+        startPosition = main.Position
+    end
+end)
+
+header.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        dragging = false
+    end
+end)
+
+game:GetService("UserInputService").InputChanged:Connect(function(input)
+    if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+        local delta = input.Position - dragStart
+        main.Position = UDim2.new(
+            startPosition.X.Scale,
+            startPosition.X.Offset + delta.X,
+            startPosition.Y.Scale,
+            startPosition.Y.Offset + delta.Y
+        )
+    end
+end)
+
+refresh()
